@@ -59,7 +59,7 @@ def remove_header_footer_by_content_traceback(body):
     
     # 首部内容特征关键词
     header_content_keywords = [
-        '登录', '注册', '首页', '主页', '无障碍', '政务', '办事', '互动', 
+        '登录', '注册', '首页', '主页', '无障碍', '办事', 
         '走进', '移动版', '手机版', '导航', '菜单', '搜索', '市政府',
         'login', 'register', 'home', 'menu', 'search', 'nav'
     ]
@@ -173,7 +173,7 @@ def find_header_footer_container(element):
         
         # 首部内容特征关键词
         header_content_keywords = [
-            '登录', '注册', '首页', '主页', '无障碍', '政务', '办事', '互动', 
+            '登录', '注册', '首页', '主页', '无障碍',  '办事',  
             '走进', '移动版', '手机版', '导航', '菜单', '搜索', '市政府'
         ]
         
@@ -226,7 +226,17 @@ def preprocess_html_remove_interference(page_tree):
     精准清理HTML - 只激进删除页面级header和footer，保护内容区域
     """
     # 获取body元素
-    body = page_tree.xpath("//body")[0] if page_tree.xpath("//body") else page_tree
+    body_elements = page_tree.xpath("//body")
+    if body_elements:
+        body = body_elements[0]
+    else:
+        # 如果没有body标签，尝试使用整个树
+        body = page_tree
+        logger.warning("未找到body标签，使用整个HTML树")
+    
+    if body is None:
+        logger.error("HTML解析失败，body为None")
+        return None
     
     logger.info("开始精准HTML清理流程...")
     
@@ -237,7 +247,7 @@ def preprocess_html_remove_interference(page_tree):
     
     # 输出清理后的HTML到日志文件
     cleaned_html = html.tostring(body, encoding='unicode', pretty_print=True)
-    logger.info("\n=== 清理后的HTML内容 ===")
+    logger.info("\n=== 清理后的HTML内容(只展示前2000字) ===")
     logger.info(cleaned_html[:2000] + "..." if len(cleaned_html) > 2000 else cleaned_html)
     logger.info("=== HTML内容结束 ===\n")
     
@@ -300,7 +310,7 @@ def remove_page_level_header_footer(body):
         if not is_header_footer:
             # Header内容特征（需要多个条件同时满足）
             header_words = [
-                '登录', '注册', '首页', '主页', '无障碍', '政务', '办事', '互动', 
+                '登录', '注册', '首页', '主页', '无障碍', '办事', 
                 '走进', '移动版', '手机版', '导航', '菜单', '搜索', '市政府',
                 'login', 'register', 'home', 'menu', 'search', 'nav'
             ]
@@ -649,6 +659,11 @@ def is_interference_container(container):
 
 def find_article_container(page_tree):
     cleaned_body = preprocess_html_remove_interference(page_tree)
+    
+    if cleaned_body is None:
+        logger.error("清理后的body为None")
+        return None
+    
     main_content = find_main_content_in_cleaned_html(cleaned_body)
     
     return main_content
@@ -677,7 +692,6 @@ def extract_content_to_markdown(html_content: str):
                 'xpath': '',
                 'status': 'failed'
             }
-        
         # 生成XPath
         xpath = generate_xpath(main_container)
         
@@ -711,40 +725,83 @@ def extract_content_to_markdown(html_content: str):
             'xpath': '',
             'status': 'failed'
         }
+
 def clean_container_html(container_html: str) -> str:
     """
     清理html内容，删除script、style和js代码
     """
     from bs4 import BeautifulSoup
+    import re
 
-    # 解析HTML
-    soup = BeautifulSoup(container_html, 'html.parser')
-    
-    # 删除script标签
-    for script in soup.find_all('script'):
-        script.decompose()
-    
-    # 删除style标签
-    for style in soup.find_all('style'):
-        style.decompose()
-    
-    # 删除包含JavaScript的属性
-    for tag in soup.find_all():
-        # 删除onclick、onload等事件属性
-        attrs_to_remove = []
-        for attr in tag.attrs:
-            if attr.startswith('on'):  # onclick, onload, onmouseover等
-                attrs_to_remove.append(attr)
+    if not container_html or not isinstance(container_html, str):
+        return container_html or ""
+
+    try:
+        # 解析HTML
+        soup = BeautifulSoup(container_html, 'html.parser')
         
-        for attr in attrs_to_remove:
-            del tag[attr]
+        # 删除script标签
+        for script in soup.find_all('script'):
+            if script:  # 确保不是None
+                script.decompose()
         
-        # 删除javascript:开头的href属性
-        if tag.get('href') and tag['href'].startswith('javascript:'):
-            del tag['href']
-    
-    # 返回清理后的HTML
-    return str(soup)
+        # 删除style标签
+        for style in soup.find_all('style'):
+            if style:  # 确保不是None
+                style.decompose()
+
+        # 1. 查找所有有style属性的元素
+        styled_elements = soup.find_all(attrs={"style": True})
+        
+        display_none_elements = []
+        for i, element in enumerate(styled_elements):
+            style = element.get('style', '')
+            if 'display' in style.lower() and 'none' in style.lower():
+                display_none_elements.append(element)
+                        
+        # 尝试删除它们
+        for element in display_none_elements:
+            try:
+                element.decompose()
+            except Exception as e:
+                pass
+        result = str(soup)
+        
+        # 检查结果中是否还有display:none
+        if 'display:none' in result.lower():
+            # 找出残留的
+            remaining = re.findall(r'<[^>]*display\s*:\s*none[^>]*>', result, re.IGNORECASE)
+
+        # 安全地删除JavaScript相关属性
+        all_tags = soup.find_all()
+        for tag in all_tags:
+            if tag is None or not hasattr(tag, 'attrs'):
+                continue
+                
+            attrs_to_remove = []
+            # 安全地遍历属性
+            for attr_name in list(tag.attrs.keys()):  # 使用list避免在迭代中修改
+                if attr_name.startswith('on'):  # onclick, onload等
+                    attrs_to_remove.append(attr_name)
+                elif (attr_name == 'href' and 
+                      tag.get(attr_name) and 
+                      str(tag[attr_name]).startswith('javascript:')):
+                    attrs_to_remove.append(attr_name)
+            
+            # 安全删除属性
+            for attr in attrs_to_remove:
+                try:
+                    del tag[attr]
+                except (AttributeError, KeyError):
+                    pass  # 属性可能已被删除
+        
+        # 返回清理后的HTML
+        return str(soup)
+        
+    except Exception as e:
+        # 如果发生错误，返回原始内容或空字符串
+        print(f"清理HTML时出错: {e}")
+        return container_html
 def clean_markdown_content(markdown_content: str) -> str:
     """
     清理Markdown内容
@@ -784,6 +841,10 @@ def clean_markdown_content(markdown_content: str) -> str:
 def find_main_content_in_cleaned_html(cleaned_body):
     """在清理后的HTML中查找主内容区域"""
     
+    if cleaned_body is None:
+        logger.error("cleaned_body为None，无法查找内容")
+        return None
+    
     # 获取所有可能的内容容器
     content_containers = cleaned_body.xpath(".//div | .//section | .//article | .//main")
     
@@ -796,6 +857,10 @@ def find_main_content_in_cleaned_html(cleaned_body):
     containers_to_remove = []
     
     for container in content_containers:
+        if container is None:
+            logger.warning("跳过None容器")
+            continue
+            
         score = calculate_content_container_score(container)
         
         # 强保护：检查是否包含 printContent 或其他重要内容
@@ -1004,6 +1069,10 @@ def calculate_container_depth(container):
     return depth
 def calculate_content_container_score(container):
     """计算内容容器得分 - 专注于识别真正的内容区域，大幅度减分干扰标签"""
+    if container is None:
+        logger.error("容器为None，无法计算得分")
+        return -1000
+    
     score = 0
     debug_info = []
     
@@ -1098,7 +1167,7 @@ def calculate_content_container_score(container):
 
     # 3. 检查内容特征 - 识别首部尾部内容
     header_content_keywords = [
-        '登录', '注册', '首页', '主页', '无障碍', '政务', '办事', '互动', 
+        '登录', '注册', '首页', '主页', '无障碍',  '办事',  
         '走进', '移动版', '手机版', '导航', '菜单', '搜索', '市政府',
         'login', 'register', 'home', 'menu', 'search', 'nav'
     ]
@@ -1121,35 +1190,62 @@ def calculate_content_container_score(container):
     logger.info(f"   首部关键词({header_content_count}个): {found_header_keywords}")
     logger.info(f"   尾部关键词({footer_content_count}个): {found_footer_keywords}")
     
-    # TODO: 部分页面正文中也会包含首部（不会包含尾部），所以，对于这部分要特殊识别。 
-
+    # 判断是否为长文本内容（正文内容通常很长）
+    is_long_content = text_length > 2000
     
-
-    # 大幅减分首部尾部内容
+    if is_long_content:
+        logger.info(f"✓ 检测到长文本内容({text_length}字符)，降低首尾部关键词减分力度")
+    
+    # 大幅减分首部尾部内容 - 但对长文本内容宽容处理
     if header_content_count >= 3:
-        score -= 300
-        debug_info.append(f"❌ 首部内容: -300 (发现{header_content_count}个关键词: {', '.join(found_header_keywords)})")
-        logger.info(f"❌ 首部内容过多，减分300")
+        if is_long_content:
+            # 长文本内容，轻微减分
+            score -= 1
+            debug_info.append(f"⚠ 首部内容(长文本): -1 (发现{header_content_count}个关键词: {', '.join(found_header_keywords)})")
+            logger.info(f"⚠ 首部内容过多但文本较长，轻微减分50")
+        else:
+            score -= 300
+            debug_info.append(f"❌ 首部内容: -300 (发现{header_content_count}个关键词: {', '.join(found_header_keywords)})")
+            logger.info(f"❌ 首部内容过多，减分300")
     elif header_content_count >= 2:
-        score -= 150
-        debug_info.append(f"❌ 首部内容: -150 (发现{header_content_count}个关键词: {', '.join(found_header_keywords)})")
-        logger.info(f"❌ 首部内容较多，减分150")
+        if is_long_content:
+            # 长文本内容，轻微减分
+            score -= 1
+            debug_info.append(f"⚠ 首部内容(长文本): -1 (发现{header_content_count}个关键词: {', '.join(found_header_keywords)})")
+            logger.info(f"⚠ 首部内容较多但文本较长，轻微减分30")
+        else:
+            score -= 150
+            debug_info.append(f"❌ 首部内容: -150 (发现{header_content_count}个关键词: {', '.join(found_header_keywords)})")
+            logger.info(f"❌ 首部内容较多，减分150")
     
-
     if footer_content_count >= 3:
-        score -= 300
-        debug_info.append(f"❌ 尾部内容: -300 (发现{footer_content_count}个关键词: {', '.join(found_footer_keywords)})")
-        logger.info(f"❌ 尾部内容过多，减分300")
+        if is_long_content:
+            # 长文本内容，轻微减分
+            score -= 1
+            debug_info.append(f"⚠ 尾部内容(长文本): -1 (发现{footer_content_count}个关键词: {', '.join(found_footer_keywords)})")
+            logger.info(f"⚠ 尾部内容过多但文本较长，轻微减分50")
+        else:
+            score -= 300
+            debug_info.append(f"❌ 尾部内容: -300 (发现{footer_content_count}个关键词: {', '.join(found_footer_keywords)})")
+            logger.info(f"❌ 尾部内容过多，减分300")
     elif footer_content_count >= 2:
-        score -= 150
-        debug_info.append(f"❌ 尾部内容: -150 (发现{footer_content_count}个关键词: {', '.join(found_footer_keywords)})")
-        logger.info(f"❌ 尾部内容较多，减分150")
+        if is_long_content:
+            # 长文本内容，轻微减分
+            score -= 1
+            debug_info.append(f"⚠ 尾部内容(长文本): -1 (发现{footer_content_count}个关键词: {', '.join(found_footer_keywords)})")
+            logger.info(f"⚠ 尾部内容较多但文本较长，轻微减分30")
+        else:
+            score -= 150
+            debug_info.append(f"❌ 尾部内容: -150 (发现{footer_content_count}个关键词: {', '.join(found_footer_keywords)})")
+            logger.info(f"❌ 尾部内容较多，减分150")
     
-    # 如果已经是严重负分，不再继续计算
-    if score < -200:
+    # 如果已经是严重负分，不再继续计算（但对长文本内容更宽容）
+    if score < -200 and not is_long_content:
         logger.info(f"❌ 当前得分过低({score})，停止后续计算")
         debug_info.append(f"❌ 得分过低，停止计算: {score}")
         return score
+    elif score < -200 and is_long_content:
+        logger.info(f"⚠ 当前得分较低({score})，但文本较长({text_length}字符)，继续计算")
     
     # 4. 基础内容长度评分
     logger.info(f"📏 内容长度评分: {text_length}字符")
@@ -1570,7 +1666,7 @@ def find_list_container(page_tree):
         # 第一轮过滤：根据内容特征直接排除首部和尾部容器
         # 1. 检查首部特征内容
         header_content_keywords = [
-            '登录', '注册', '首页', '主页', '无障碍', '政务', '办事', '互动', 
+            '登录', '注册', '首页', '主页', '无障碍', '办事', 
             '走进', '移动版', '手机版', '导航', '菜单', '搜索', '市政府',
             '长者模式','微信','ipv6','信息公开',
             'login', 'register', 'home', 'menu', 'search', 'nav'
@@ -1715,7 +1811,7 @@ def find_list_container(page_tree):
         if items and len(items) > 2:
             # 只检查明显的导航词汇，减少误判
             strong_nav_words = [
-                '登录', '注册', '首页', '主页', '无障碍', '政务', '办事', '互动', 
+                '登录', '注册', '首页', '主页', '无障碍', '办事', 
                 '走进', '移动版', '手机版', '导航', '菜单', '搜索', '市政府',
                 'login', 'register', 'home', 'menu', 'search', 'nav'
             ]
@@ -1878,7 +1974,7 @@ def find_list_container(page_tree):
                 # 检查内容负面特征（只在前2层检查，避免过度检查）
                 if depth < 2:
                     # 首部内容特征
-                    header_content = ['登录', '注册', '首页', '主页', '无障碍', '政务', '办事', '互动', '走进']
+                    header_content = ['登录', '注册', '首页', '主页', '无障碍', '办事', '走进']
                     header_count = sum(1 for word in header_content if word in parent_text)
                     
                     # 尾部内容特征
@@ -2160,13 +2256,13 @@ if __name__ == "__main__":
         print("API文档: http://localhost:8000/docs")
         print("健康检查: http://localhost:8000/health")
         start_server()
-    else:
-        # 原有的文件处理逻辑（保留向后兼容）
-        try:
-            input_file = "test.yml"    # 输入文件路径
-            output_file = "testout.yml"  # 输出文件路径
+    # else:
+    #     # 原有的文件处理逻辑（保留向后兼容）
+    #     try:
+    #         input_file = "test.yml"    # 输入文件路径
+    #         output_file = "testout.yml"  # 输出文件路径
             
-            process_yml_file(input_file, output_file)
+    #         process_yml_file(input_file, output_file)
 
             # input_folder = "waitprocess"
             # output_folder = "processed"  
@@ -2180,8 +2276,8 @@ if __name__ == "__main__":
             #     base_name = os.path.basename(input_file)  
             #     output_file = os.path.join(output_folder, base_name)
             #     process_yml_file(input_file, output_file)
-        finally:
-            driver_pool.close_all()
+        # finally:
+        #     driver_pool.close_all()
 
 
 # version1.0 
