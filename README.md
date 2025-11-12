@@ -1,5 +1,5 @@
 # XpathGet
-包含自研正文定位算法，可实现定位页面正文内容，并将页面内容清理无关标签后转化为MD格式。HTML转MD
+自研正文定位算法，可实现定位页面正文内容，并将页面内容清理无关标签后转化为MD格式。HTML转MD
 
 1. 创建虚拟环境，按照requirement要求安装依赖（可能写的不全，自己看一下，beautifulsoup和....某个忘记写了）
 2. 运行zGetContentByXpath.py文件`python zGetContentByXpath.py api`
@@ -35,3 +35,68 @@ else:
 4. 对于服务端的部署：你需要上传wwebdriver_pool.py文件和zGetContentByXpath.py和requirement_updated.txt三个文件，记得创建虚拟环境
 5. 使用` nohup gunicorn -k uvicorn.workers.UvicornWorker zGetContentByXpath:app --bind 0.0.0.0:8000 --workers 4 > gunicorn.log 2>&1 &`启动api服务
 6. 使用`ps aux | grep gunicorn`查看运行情况
+
+> 算法已经非常稳健，切勿修改任何一个数字和字符，每一个分值的计算和确定都是大量的测试数据得到的经验。
+
+## API 端点
+
+### 1. 健康检查
+
+**GET** `/health`
+
+检查API服务状态。
+
+**响应示例:**
+```json
+{
+  "status": "healthy",
+  "timestamp": "2024-01-15T10:30:00"
+}
+```
+
+### 2. 提取内容
+
+**POST** `/extract`
+
+从HTML内容中提取正文并转换为Markdown。
+
+**请求体:**
+```json
+{
+  "html_content": "<html>...</html>"
+}
+```
+
+**响应体:**
+```json
+{
+  "markdown_content": "# 标题\n\n这是正文内容...",
+  "xpath": "//div[@class='content']",
+  "status": "success"
+}
+```
+
+### 使用步骤：
+* 先进入虚拟环境，要是误删除了虚拟环境文件，就按照requirement_updated重新安装，但requirement_updated里面可能少写了一个或者两个包，自己去尝试
+
+```shell
+. venv/bin/activate 
+```
+
+* 然后进行部署
+
+```shell
+nohup gunicorn -k uvicorn.workers.UvicornWorker zGetContentByXpath:app --bind 0.0.0.0:8000 --workers 4 > gunicorn.log 2>&1 &
+```
+
+* 查看运行情况
+
+```shell
+ps aux | grep gunicorn
+```
+
+* 关闭运行
+
+```
+kill xxxx
+```
