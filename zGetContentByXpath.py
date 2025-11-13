@@ -59,7 +59,7 @@ def remove_header_footer_by_content_traceback(body):
     
     # 首部内容特征关键词
     header_content_keywords = [
-        '登录', '注册', '首页', '主页', '无障碍', '办事', 
+        '登录', '注册', '首页', '主页', '无障碍', '办事', '无障碍浏览','打印','收藏','机构概况','在线服务','互动交流',
         '走进', '移动版', '手机版', '导航', '菜单', '搜索', '市政府',
         'login', 'register', 'home', 'menu', 'search', 'nav'
     ]
@@ -173,7 +173,7 @@ def find_header_footer_container(element):
         
         # 首部内容特征关键词
         header_content_keywords = [
-            '登录', '注册', '首页', '主页', '无障碍',  '办事',  
+            '登录', '注册', '首页', '主页', '无障碍',  '办事',  '无障碍浏览','打印','收藏','机构概况','在线服务','互动交流', 
             '走进', '移动版', '手机版', '导航', '菜单', '搜索', '市政府'
         ]
         
@@ -240,6 +240,10 @@ def preprocess_html_remove_interference(page_tree):
     
     logger.info("开始精准HTML清理流程...")
     
+    # 第零步：删除所有 display:none 的不可见元素
+    display_none_count = remove_display_none_elements(body)
+    logger.info(f"删除了 {display_none_count} 个 display:none 不可见元素")
+    
     # 第一步：激进删除明确的页面级header和footer
     removed_count = remove_page_level_header_footer(body)
     
@@ -252,6 +256,45 @@ def preprocess_html_remove_interference(page_tree):
     logger.info("=== HTML内容结束 ===\n")
     
     return body
+
+def remove_display_none_elements(body):
+    """
+    删除所有 display:none 的不可见元素
+    这些元素在页面上不可见，不应该被提取
+    """
+    logger.info("开始删除 display:none 不可见元素...")
+    
+    removed_count = 0
+    
+    # 查找所有有 style 属性的元素
+    elements_with_style = body.xpath(".//*[@style]")
+    
+    elements_to_remove = []
+    
+    for element in elements_with_style:
+        style = element.get('style', '').lower()
+        
+        # 检查是否包含 display:none 或 display: none
+        if 'display' in style and 'none' in style:
+            # 更精确的检查，避免误判（如 display:inline）
+            import re
+            if re.search(r'display\s*:\s*none', style, re.IGNORECASE):
+                elements_to_remove.append(element)
+                elem_id = element.get('id', '')
+                elem_class = element.get('class', '')
+                logger.info(f"  标记删除不可见元素: {element.tag} id='{elem_id[:30]}' class='{elem_class[:30]}'")
+    
+    # 删除标记的元素
+    for element in elements_to_remove:
+        try:
+            parent = element.getparent()
+            if parent is not None:
+                parent.remove(element)
+                removed_count += 1
+        except Exception as e:
+            logger.error(f"删除 display:none 元素时出错: {e}")
+    
+    return removed_count
 
 def remove_page_level_header_footer(body):
     """
@@ -719,7 +762,11 @@ def extract_content_to_markdown(html_content: str):
         }
         
     except Exception as e:
-        logger.error(f"提取内容时出错: {str(e)}")
+        import traceback
+        error_msg = str(e) if str(e) else repr(e)
+        logger.error(f"提取内容时出错: {error_msg}")
+        logger.error(f"错误类型: {type(e).__name__}")
+        logger.error(f"完整堆栈:\n{traceback.format_exc()}")
         return {
             'markdown_content': '',
             'xpath': '',
@@ -893,8 +940,29 @@ def find_main_content_in_cleaned_html(cleaned_body):
     
     # 选择得分最高的容器
     scored_containers.sort(key=lambda x: x[1], reverse=True)
-    # best_container = scored_containers[0][0]
-    # 选择了得分次一级的容器
+    
+    # 输出前5名容器的详细信息
+    logger.info("\n" + "="*80)
+    logger.info("📊 容器评分排行榜 (Top 5):")
+    logger.info("="*80)
+    
+    top_5 = scored_containers[:5]
+    for idx, (container, score) in enumerate(top_5, 1):
+        classes = container.get('class', '')
+        elem_id = container.get('id', '')
+        text_length = len(container.text_content().strip())
+        child_count = len(container.xpath(".//*"))
+        
+        logger.info(f"\n🏆 排名 #{idx} - 得分: {score}")
+        logger.info(f"   标签: {container.tag}")
+        logger.info(f"   类名: {classes[:80]}{'...' if len(classes) > 80 else ''}")
+        logger.info(f"   ID: {elem_id[:50]}{'...' if len(elem_id) > 50 else ''}")
+        logger.info(f"   文本长度: {text_length} 字符")
+        logger.info(f"   子元素数: {child_count}")
+    
+    logger.info("\n" + "="*80)
+    
+    # 智能选择容器：优先选择更精确的容器的父容器
     best_score = scored_containers[0][1]
     
     # ---------------------------------------------------------------------------------------------原方法，对于极为复杂的页面会定位的“过于准确”
@@ -907,29 +975,214 @@ def find_main_content_in_cleaned_html(cleaned_body):
     # logger.info(f"选择最佳内容容器，得分: {best_score}")
     # logger.info(f"容器信息: {best_container.tag} class='{best_container.get('class', '')[:50]}'")
     # ---------------------------------------------------------------------------------------------
-    # 设置分数阈值，考虑分数相近的容器（差距在20分以内）
-    score_threshold = 20
+    # 智能容器选择策略
+    logger.info("\n🤔 开始智能容器选择...")
     
-    # 找出分数在阈值范围内的容器
-    similar_score_containers = [(container, score) for container, score in scored_containers 
-                               if abs(score - best_score) <= score_threshold]
+    # 检查前5名容器是否都有长内容
+    top_5_containers = scored_containers[:5]
+    long_content_containers = []
     
-    logger.info(f"找到 {len(similar_score_containers)} 个分数相近的容器:")
-    for i, (container, score) in enumerate(similar_score_containers):
-        logger.info(f"容器{i+1}: {container.tag} class='{container.get('class', '')}' 得分: {score}")
+    for container, score in top_5_containers:
+        text_length = len(container.text_content().strip())
+        classes = container.get('class', '')
+        elem_id = container.get('id', '')
+        
+        if text_length > 1000:  # 长内容阈值
+            long_content_containers.append((container, score, text_length))
+            logger.info(f"   ✓ 发现长内容容器: 得分={score}, 长度={text_length}")
+            logger.info(f"      标签={container.tag}, class='{classes}', id='{elem_id}'")
     
-    # 如果有多个分数相近的容器，选择层级最深的
-    if len(similar_score_containers) > 1:
-        # best_container = select_deepest_container_from_similar([c for c, s in similar_score_containers])
-        # 选择最优的
-        best_container = select_best_container_prefer_child([c for c, s in similar_score_containers], scored_containers)
+    # 策略1：如果有多个长内容容器且分数相近，选择更小（更精确）的
+    if len(long_content_containers) >= 2:
+        # 检查分数差距
+        scores = [score for _, score, _ in long_content_containers]
+        max_score = max(scores)
+        min_score = min(scores)
+        score_diff = max_score - min_score
+        
+        logger.info(f"   发现 {len(long_content_containers)} 个长内容容器")
+        logger.info(f"   分数范围: {min_score} ~ {max_score}, 差距: {score_diff}")
+        
+        if score_diff <= 200:  # 分数差距不大
+            logger.info("   ✓ 分数差距较小，优先选择更精确的容器")
+            
+            # 按子元素数量排序（子元素少的更精确）
+            long_content_containers.sort(key=lambda x: len(x[0].xpath(".//*")))
+            
+            # 选择子元素最少但内容足够长的容器
+            selected_precise_container = None
+            selected_text_length = 0  # 记录选中容器的文本长度
+            for container, score, text_length in long_content_containers:
+                child_count = len(container.xpath(".//*"))
+                classes = container.get('class', '')
+                elem_id = container.get('id', '')
+                
+                logger.info(f"   候选: 得分={score}, 长度={text_length}, 子元素={child_count}")
+                logger.info(f"      标签={container.tag}, class='{classes}', id='{elem_id}'")
+                
+                # 确保不是过度精确（子元素太少可能丢失内容）
+                if child_count >= 10 or text_length > 3000:
+                    selected_precise_container = container
+                    selected_text_length = text_length  # 保存文本长度
+                    logger.info(f"   ✅ 找到精确容器")
+                    break
+            
+            if selected_precise_container is not None:
+                # 向上遍历找到有意义的父容器
+                def find_meaningful_parent(element):
+                    """
+                    向上遍历找到有意义的父容器：
+                    1. 必须是 div、table、section、article、main 等容器标签
+                    2. 必须有 class 或 id 属性
+                    3. 不能是 body 标签
+                    """
+                    current = element.getparent()
+                    depth = 0
+                    max_depth = 5  # 最多向上查找5层
+                    
+                    # 有意义的容器标签
+                    meaningful_tags = ['div','section', 'article', 'main']
+                    
+                    while current is not None and depth < max_depth:
+                        tag = current.tag.lower()
+                        classes = current.get('class', '').strip()
+                        elem_id = current.get('id', '').strip()
+                        
+                        logger.info(f"   🔍 检查第{depth+1}层父节点: {tag}, class='{classes[:30]}', id='{elem_id[:30]}'")
+                        
+                        # 到达body就停止
+                        if tag == 'body':
+                            logger.info(f"      ⛔ 到达body标签，停止向上查找")
+                            break
+                        
+                        # 检查是否是有意义的容器
+                        is_meaningful_tag = tag in meaningful_tags
+                        has_identifier = bool(classes or elem_id)
+                        
+                        if is_meaningful_tag and has_identifier:
+                            logger.info(f"      ✅ 找到有意义的父容器: {tag}")
+                            return current, depth + 1
+                        elif not is_meaningful_tag:
+                            logger.info(f"      ⏭ 跳过无意义标签: {tag}")
+                        elif not has_identifier:
+                            logger.info(f"      ⏭ 跳过无标识符的容器")
+                        
+                        current = current.getparent()
+                        depth += 1
+                    
+                    logger.info(f"   ⚠ 未找到有意义的父容器（已查找{depth}层）")
+                    return None, 0
+                
+                parent_container, parent_depth = find_meaningful_parent(selected_precise_container)
+                
+                if parent_container is not None:
+                    # 检查父容器是否合理
+                    parent_classes = parent_container.get('class', '')
+                    parent_id = parent_container.get('id', '')
+                    parent_text_length = len(parent_container.text_content().strip())
+                    parent_child_count = len(parent_container.xpath(".//*"))
+                    
+                    logger.info(f"   📦 找到的父容器（向上{parent_depth}层）:")
+                    logger.info(f"      标签={parent_container.tag}, class='{parent_classes}', id='{parent_id}'")
+                    logger.info(f"      文本长度={parent_text_length}, 子元素={parent_child_count}")
+                    
+                    # 检查父容器是否包含干扰特征
+                    parent_combined = f"{parent_classes} {parent_id}".lower()
+                    has_interference = any(keyword in parent_combined for keyword in 
+                                         ['header', 'footer', 'nav', 'menu', 'sidebar'])
+                    
+                    if not has_interference and parent_text_length > selected_text_length * 0.8:
+                        best_container = parent_container
+                        logger.info(f"   ✅ 选择父容器 (避免过度精确)")
+                    else:
+                        best_container = selected_precise_container
+                        if has_interference:
+                            logger.info(f"   ⚠ 父容器包含干扰特征，保持精确容器")
+                        else:
+                            logger.info(f"   ⚠ 父容器内容差异过大，保持精确容器")
+                else:
+                    best_container = selected_precise_container
+                    logger.info(f"   ⚠ 无有效父容器，保持精确容器")
+            else:
+                # 如果都太小，选择得分最高的
+                best_container = scored_containers[0][0]
+                logger.info(f"   ⚠ 所有候选容器都太小，选择得分最高的")
+        else:
+            # 分数差距大，直接选择得分最高的
+            best_container = scored_containers[0][0]
+            logger.info(f"   分数差距较大，选择得分最高的容器")
     else:
-        best_container = scored_containers[0][0]
-    # best_container = scored_containers[0][0]
-    # 获取最终选择的容器分数
-    final_score = next(score for container, score in scored_containers if container == best_container)
-    logger.info(f"最终选择容器，得分: {final_score}")
-    logger.info(f"容器信息: {best_container.tag} class='{best_container.get('class', '')}'")
+        # 策略2：使用原有的父子关系选择逻辑
+        logger.info("   使用父子关系选择策略...")
+        
+        # 设置分数阈值，考虑分数相近的容器
+        score_threshold = 20
+        similar_score_containers = [(container, score) for container, score in scored_containers 
+                                   if abs(score - best_score) <= score_threshold]
+        
+        logger.info(f"   找到 {len(similar_score_containers)} 个分数相近的容器")
+        
+        if len(similar_score_containers) > 1:
+            best_container = select_best_container_prefer_child(
+                [c for c, s in similar_score_containers], 
+                scored_containers
+            )
+        else:
+            best_container = scored_containers[0][0]
+    
+    # 最终安全检查：确保选中的容器不包含干扰特征
+    def has_interference_keywords(container):
+        """检查容器的class/id是否包含干扰关键词"""
+        classes = container.get('class', '').lower()
+        elem_id = container.get('id', '').lower()
+        combined = f"{classes} {elem_id}"
+        
+        interference_keywords = ['header', 'footer', 'nav', 'navigation', 'menu', 'sidebar']
+        
+        for keyword in interference_keywords:
+            if keyword in combined:
+                return True, keyword
+        return False, None
+    
+    has_interference, keyword = has_interference_keywords(best_container)
+    
+    if has_interference:
+        logger.info(f"   ⚠️ 警告：选中的容器包含干扰关键词 '{keyword}'")
+        logger.info(f"   🔄 尝试从候选列表中选择下一个容器...")
+        
+        # 从scored_containers中找到下一个不包含干扰特征的容器
+        for container, score in scored_containers:
+            has_interference_check, _ = has_interference_keywords(container)
+            if not has_interference_check and score > 0:
+                logger.info(f"   ✅ 找到替代容器，得分: {score}")
+                logger.info(f"      标签={container.tag}, class='{container.get('class', '')}', id='{container.get('id', '')}'")
+                best_container = container
+                break
+        else:
+            logger.info(f"   ⚠️ 未找到合适的替代容器，保持原选择（但可能不准确）")
+    
+    # 获取最终选择的容器分数（如果是父容器，可能不在原始列表中）
+    try:
+        final_score = next(score for container, score in scored_containers if container == best_container)
+    except StopIteration:
+        # 如果best_container不在scored_containers中（比如选择了父容器），重新计算分数
+        logger.info("   ℹ 最终容器不在原始评分列表中，重新计算分数...")
+        final_score = calculate_content_container_score(best_container)
+        logger.info(f"   重新计算的得分: {final_score}")
+    
+    final_text_length = len(best_container.text_content().strip())
+    final_child_count = len(best_container.xpath(".//*"))
+    
+    logger.info("\n" + "="*80)
+    logger.info("🎯 最终选择结果:")
+    logger.info(f"   得分: {final_score}")
+    logger.info(f"   标签: {best_container.tag}")
+    logger.info(f"   类名: {best_container.get('class', '')[:80]}")
+    logger.info(f"   ID: {best_container.get('id', '')[:50]}")
+    logger.info(f"   文本长度: {final_text_length} 字符")
+    logger.info(f"   子元素数: {final_child_count}")
+    logger.info("="*80 + "\n")
+    
     return best_container
 def is_child_of(child_element, parent_element):
     """检查child_element是否是parent_element的子节点"""
@@ -1087,6 +1340,29 @@ def calculate_content_container_score(container):
     logger.info(f"ID: {elem_id[:50]}{'...' if len(elem_id) > 50 else ''}")
     logger.info(f"文本长度: {text_length}")
 
+    # 0. 检查 display:none - 直接排除不可见元素
+    style = container.get('style', '').lower()
+    if 'display' in style and 'none' in style:
+        score -= 1000  # 极大减分，基本排除
+        debug_info.append("❌ display:none 不可见元素: -1000")
+        logger.info("❌ 发现 display:none，这是不可见元素，直接排除")
+        logger.info(f"最终得分: {score}")
+        return score
+    
+    # 检查祖先元素是否有 display:none
+    current = container.getparent()
+    depth = 0
+    while current is not None and depth < 3:  # 检查3层祖先
+        parent_style = current.get('style', '').lower()
+        if 'display' in parent_style and 'none' in parent_style:
+            score -= 800  # 祖先不可见，也要大幅减分
+            debug_info.append(f"❌ 祖先元素 display:none (第{depth+1}层): -800")
+            logger.info(f"❌ 第{depth+1}层祖先元素有 display:none，大幅减分")
+            logger.info(f"最终得分: {score}")
+            return score
+        current = current.getparent()
+        depth += 1
+
     # # 特殊ID加分 - printContent通常是主要内容区域
     # special_id_keywords = ['printcontent', 'printContent']
     # for keyword in special_id_keywords:
@@ -1132,7 +1408,9 @@ def calculate_content_container_score(container):
     #         return score
     # ----------------------------------------------------------------------------
 
-    # 2. 检查强烈的干扰类名/ID - 大幅减分
+    # 2. 基于class/id的语义判断 - 这是最可靠的判断方式
+    
+    # 2.1 强干扰特征（导航、头部、尾部等）- 大幅减分
     strong_interference_keywords = [
         'header', 'footer', 'nav', 'navigation', 'menu', 'menubar', 
         'topbar', 'bottom', 'sidebar', 'aside', 'banner', 'ad', 'advertisement'
@@ -1147,7 +1425,6 @@ def calculate_content_container_score(container):
     interference_count = 0
     found_interference_keywords = []
 
-    # "main-nav sidebar ad-banner"
     combined_text = f"{classes} {elem_id}".strip().lower()
 
     for keyword, pattern in interference_patterns.items():
@@ -1164,10 +1441,32 @@ def calculate_content_container_score(container):
         if interference_count >= 2:
             logger.info(f"❌ 干扰特征过多({interference_count}个)，直接返回负分: {score}")
             return score
+    
+    # 2.2 正面内容特征 - 适当加分
+    positive_content_keywords = [
+        'content', 'article', 'main', 'body', 'text', 'detail', 
+        'info', 'news', 'post', 'entry'
+    ]
+    
+    positive_count = 0
+    found_positive_keywords = []
+    
+    for keyword in positive_content_keywords:
+        pattern = create_pattern(keyword)
+        if pattern.search(combined_text):
+            positive_count += 1
+            found_positive_keywords.append(keyword)
+    
+    if positive_count > 0:
+        # 正面特征加分，但不要加太多
+        positive_bonus = min(positive_count * 30, 90)
+        score += positive_bonus
+        debug_info.append(f"✓ 正面内容特征: +{positive_bonus} (发现{positive_count}个: {', '.join(found_positive_keywords)})")
+        logger.info(f"✓ 发现正面内容特征: {', '.join(found_positive_keywords)}，加分: {positive_bonus}")
 
-    # 3. 检查内容特征 - 识别首部尾部内容
+    # 4. 检查内容特征 - 识别首部尾部内容
     header_content_keywords = [
-        '登录', '注册', '首页', '主页', '无障碍',  '办事',  
+        '登录', '注册', '首页', '主页', '无障碍',  '办事',   '无障碍浏览','打印','收藏','机构概况','在线服务','互动交流',
         '走进', '移动版', '手机版', '导航', '菜单', '搜索', '市政府',
         'login', 'register', 'home', 'menu', 'search', 'nav'
     ]
@@ -1186,23 +1485,54 @@ def calculate_content_container_score(container):
     header_content_count = len(found_header_keywords)
     footer_content_count = len(found_footer_keywords)
     
+    # 3. 简化的链接密度检查（辅助判断）
+    links = container.xpath(".//a[@href]")
+    
+    if links and text_length > 0:
+        link_count = len(links)
+        link_text_total = sum(len(link.text_content().strip()) for link in links)
+        
+        # 只计算最关键的指标：链接密度（每1000字符的链接数）
+        links_per_100_chars = (link_count / text_length) * 10000
+        link_text_ratio = link_text_total / text_length
+        
+        logger.info(f"🔗 链接分析: {link_count}个链接, 密度={links_per_100_chars:.2f}个/5000字符, 占比={link_text_ratio:.1%}")
+        
+        # 简单判断：链接密度过高就减分
+        if link_count > 5 :
+            if links_per_100_chars > 5:
+                score -= 100
+                debug_info.append(f"❌ 极高链接密度: -100")
+            elif links_per_100_chars > 3:
+                score -= 50
+                debug_info.append(f"⚠ 高链接密度: -50")
+    
     logger.info(f"📝 内容特征分析:")
     logger.info(f"   首部关键词({header_content_count}个): {found_header_keywords}")
     logger.info(f"   尾部关键词({footer_content_count}个): {found_footer_keywords}")
     
     # 判断是否为长文本内容（正文内容通常很长）
-    is_long_content = text_length > 2000
+    is_long_content = text_length > 3000
     
     if is_long_content:
         logger.info(f"✓ 检测到长文本内容({text_length}字符)，降低首尾部关键词减分力度")
     
+    if header_content_count >= 5:
+        if is_long_content:
+            score -= 100
+            debug_info.append(f"⚠ 首部内容(长文本): -100 (发现{header_content_count}个关键词: {', '.join(found_header_keywords)})")
+            logger.info(f"⚠ 首部内容过多\文本较长，减分100")
+        else:
+            score -= 300
+            debug_info.append(f"❌ 首部内容: -300 (发现{header_content_count}个关键词: {', '.join(found_header_keywords)})")
+            logger.info(f"❌ 首部内容过多，减分300")
     # 大幅减分首部尾部内容 - 但对长文本内容宽容处理
-    if header_content_count >= 3:
+    elif header_content_count >= 3:
         if is_long_content:
             # 长文本内容，轻微减分
             score -= 1
             debug_info.append(f"⚠ 首部内容(长文本): -1 (发现{header_content_count}个关键词: {', '.join(found_header_keywords)})")
-            logger.info(f"⚠ 首部内容过多但文本较长，轻微减分50")
+            logger.info(f"⚠ 首部内容过多但文本较长，轻微减分1")
         else:
             score -= 300
             debug_info.append(f"❌ 首部内容: -300 (发现{header_content_count}个关键词: {', '.join(found_header_keywords)})")
@@ -1212,7 +1542,7 @@ def calculate_content_container_score(container):
             # 长文本内容，轻微减分
             score -= 1
             debug_info.append(f"⚠ 首部内容(长文本): -1 (发现{header_content_count}个关键词: {', '.join(found_header_keywords)})")
-            logger.info(f"⚠ 首部内容较多但文本较长，轻微减分30")
+            logger.info(f"⚠ 首部内容较多但文本较长，轻微减分1")
         else:
             score -= 150
             debug_info.append(f"❌ 首部内容: -150 (发现{header_content_count}个关键词: {', '.join(found_header_keywords)})")
@@ -1221,9 +1551,9 @@ def calculate_content_container_score(container):
     if footer_content_count >= 3:
         if is_long_content:
             # 长文本内容，轻微减分
-            score -= 1
-            debug_info.append(f"⚠ 尾部内容(长文本): -1 (发现{footer_content_count}个关键词: {', '.join(found_footer_keywords)})")
-            logger.info(f"⚠ 尾部内容过多但文本较长，轻微减分50")
+            score -= 100
+            debug_info.append(f"⚠ 尾部内容(长文本): -100 (发现{footer_content_count}个关键词: {', '.join(found_footer_keywords)})")
+            logger.info(f"⚠ 尾部内容过多但文本较长，轻微减分100")
         else:
             score -= 300
             debug_info.append(f"❌ 尾部内容: -300 (发现{footer_content_count}个关键词: {', '.join(found_footer_keywords)})")
@@ -1231,9 +1561,9 @@ def calculate_content_container_score(container):
     elif footer_content_count >= 2:
         if is_long_content:
             # 长文本内容，轻微减分
-            score -= 1
-            debug_info.append(f"⚠ 尾部内容(长文本): -1 (发现{footer_content_count}个关键词: {', '.join(found_footer_keywords)})")
-            logger.info(f"⚠ 尾部内容较多但文本较长，轻微减分30")
+            score -= 50
+            debug_info.append(f"⚠ 尾部内容(长文本): -50 (发现{footer_content_count}个关键词: {', '.join(found_footer_keywords)})")
+            logger.info(f"⚠ 尾部内容较多但文本较长，轻微减分50")
         else:
             score -= 150
             debug_info.append(f"❌ 尾部内容: -150 (发现{footer_content_count}个关键词: {', '.join(found_footer_keywords)})")
@@ -1247,9 +1577,13 @@ def calculate_content_container_score(container):
     elif score < -200 and is_long_content:
         logger.info(f"⚠ 当前得分较低({score})，但文本较长({text_length}字符)，继续计算")
     
-    # 4. 基础内容长度评分
+    # 5. 基础内容长度评分
     logger.info(f"📏 内容长度评分: {text_length}字符")
-    if text_length > 1000:
+    if text_length > 5000:
+        score+=200
+        debug_info.append("✓ 超长内容: +200")
+        logger.info(f"✓ 超长内容加分: +200")
+    elif text_length > 1000:
         score += 50
         debug_info.append("✓ 长内容: +50")
         logger.info(f"✓ 长内容加分: +50")
@@ -1266,7 +1600,7 @@ def calculate_content_container_score(container):
         debug_info.append("❌ 内容太少: -20")
         logger.info(f"❌ 内容太少减分: -20")
     
-    # 5. Role属性检查
+    # 6. Role属性检查
     role = container.get('role', '').lower()
     logger.info(f"🎭 Role属性: '{role}'")
     if role == 'viewlist':
@@ -1278,7 +1612,7 @@ def calculate_content_container_score(container):
         debug_info.append(f"✓ Role特征: +50 (role='{role}')")
         logger.info(f"✓ 发现{role}角色，加分50")
     
-    # 6. 内容特征检测 - 不限于列表
+    # 7. 内容特征检测 - 不限于列表
     content_indicators = [
         # 时间特征
         (r'\d{4}-\d{2}-\d{2}|\d{4}年\d{1,2}月\d{1,2}日|\d{4}/\d{1,2}/\d{1,2}|发布时间|更新日期|发布日期|成文日期', 30, '时间特征'),
@@ -1317,30 +1651,16 @@ def calculate_content_container_score(container):
     else:
         logger.info(f"   ❌ 未发现内容特征")
     
-    # 7. 正面类名/ID特征
-    positive_keywords = [
-        'content', 'main', 'article', 'news', 'data', 'info', 
-        'detail', 'result', 'list', 'body', 'text', 'container'
-    ]
+    # 8. 额外的正面特征检查（已在步骤2.2中处理，避免重复加分）
     
-    positive_matches = 0
-    for keyword in positive_keywords:
-        if keyword in classes or keyword in elem_id:
-            positive_matches += 1
-    
-    if positive_matches > 0:
-        positive_score = min(positive_matches * 20, 60)
-        score += positive_score
-        debug_info.append(f"正面特征: +{positive_score}")
-    
-    # 8. 结构化内容检测 - 不限于列表
+    # 9. 结构化内容检测 - 不限于列表
     structured_elements = container.xpath(".//p | .//h1 | .//h2 | .//h3 | .//h4 | .//h5 | .//h6 | .//li | .//table | .//div[contains(@class,'content')] | .//section")
     if len(structured_elements) > 5:
         structure_score = min(len(structured_elements) * 2, 40)
         score += structure_score
         debug_info.append(f"结构化内容: +{structure_score}")
     
-    # 9. 图片内容
+    # 10. 图片内容
     images = container.xpath(".//img")
     if len(images) > 0:
         image_score = min(len(images) * 3, 150)
@@ -1666,7 +1986,7 @@ def find_list_container(page_tree):
         # 第一轮过滤：根据内容特征直接排除首部和尾部容器
         # 1. 检查首部特征内容
         header_content_keywords = [
-            '登录', '注册', '首页', '主页', '无障碍', '办事', 
+            '登录', '注册', '首页', '主页', '无障碍', '办事', '无障碍浏览','打印','收藏','机构概况','在线服务','互动交流',
             '走进', '移动版', '手机版', '导航', '菜单', '搜索', '市政府',
             '长者模式','微信','ipv6','信息公开',
             'login', 'register', 'home', 'menu', 'search', 'nav'
@@ -1811,7 +2131,7 @@ def find_list_container(page_tree):
         if items and len(items) > 2:
             # 只检查明显的导航词汇，减少误判
             strong_nav_words = [
-                '登录', '注册', '首页', '主页', '无障碍', '办事', 
+                '登录', '注册', '首页', '主页', '无障碍', '办事', '无障碍浏览','打印','收藏','机构概况','在线服务','互动交流',
                 '走进', '移动版', '手机版', '导航', '菜单', '搜索', '市政府',
                 'login', 'register', 'home', 'menu', 'search', 'nav'
             ]
